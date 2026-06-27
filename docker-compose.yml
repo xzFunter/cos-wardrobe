@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # 后端服务
+  backend:
+    build: ./backend
+    container_name: cos_wardrobe_backend
+    ports:
+      - "3001:3001"
+    volumes:
+      # 将 SQLite 数据库文件挂载到群晖本地路径
+      - ./backend/db:/app/db
+      # 将用户上传的 COS 衣服和配件图片挂载到群晖本地路径
+      - ./backend/uploads:/app/uploads
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    restart: always
+
+  # 前端服务 (通过 Nginx 代理)
+  frontend:
+    build: ./frontend
+    container_name: cos_wardrobe_frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: always

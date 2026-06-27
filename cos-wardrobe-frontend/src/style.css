@@ -1,0 +1,60 @@
+/* 1. 引入 NES.css 的核心样式 */
+@import 'nes.css/css/nes.min.css';
+
+/* 2. 定义 Zpix 像素中文字体 */
+@font-face {
+  font-family: 'Zpix';
+  /* 注意路径前有个斜杠，直接指向 public 文件夹 */
+  src: url('/fonts/zpix.ttf') format('truetype'); 
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* 3. 全局基础样式与字体应用 */
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #212529; /* 经典深色背景 */
+  color: #fff;
+  /* 应用全局字体，如果没有加载成功则回退到系统默认的等宽字体 */
+  font-family: 'Zpix', 'Courier New', Courier, monospace; 
+}
+
+/* 让所有交互元素继承我们的像素字体 */
+button, input, textarea, select, dialog {
+  font-family: inherit;
+}
+
+/* 4. 全局强制像素渲染 (核心魔法) */
+* {
+  box-sizing: border-box;
+}
+
+/* 将所有图片、Canvas 和特定类名强制设为点阵渲染，放大绝对不模糊 */
+img, 
+canvas, 
+.pixel-render {
+  image-rendering: pixelated; /* Chrome / Edge / Safari */
+  image-rendering: -moz-crisp-edges; /* Firefox */
+  image-rendering: crisp-edges;
+}
+
+/* 5. 覆盖 Vue Flow 的部分默认样式以适应深色像素风 (可选) */
+.vue-flow__node {
+  font-family: inherit;
+}
+
+/* 隐藏所有列表的滚动条，但保留滚动功能 */
+.hide-scrollbar {
+  /* IE/Edge */
+  -ms-overflow-style: none;
+  /* Firefox */
+  scrollbar-width: none;
+}
+
+/* Chrome, Safari, Opera */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}

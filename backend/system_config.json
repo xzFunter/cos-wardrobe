@@ -1,0 +1,63 @@
+{
+  "_comment": "勇者公会 (COS 服装管理系统) - 全局核心配置文件",
+
+"asset_paths": {
+    "base_dir": "assets",
+    "directories": {
+      "models": "Model_img",
+      "components": "Component_img",
+      "costumes": "Costume_img",
+      "ui":"Ui_img",
+      "common_components": "Common_component_img"
+    }
+  },
+
+  "schema_definitions": {
+    "User": "用户对象：包含 id, username(用户名), avatar(头像/图标)",
+    "Costume": "服装套装对象：包含 id, user_id(所属用户), name(套装名称), cover_url(封面图)",
+    "ModelTemplate": "模特底图模板：包含 id, name(模板名称), image_url(图片路径或图标)",
+    "ComponentTemplate": "全局组件字典：包含 id, name(组件名称), type(所属枚举分类), icon_url(默认图标)",
+    "CommonComponent": "全局组件字典：包含 id, name(组件名称), type(所属枚举分类), icon_url(默认图标)"
+  },
+
+  "enums": {
+    "component_types": [
+      "头饰", "假发", "面部道具", "颈饰",
+      "上装", "下装", "连衣裙", "外套",
+      "鞋靴", "手套", "武器", "特殊道具"
+    ]
+  },
+
+  "seed_data": {
+    "users": [
+      { "id": 1, "username": "游侠 (User A)", "avatar": "🏹" },
+      { "id": 2, "username": "修仙者 (User B)", "avatar": "📜" }
+    ],
+    "model_templates": [
+      { "id": 1, "name": "女性-基础素体", "image_url": "🧍‍♀️" },
+      { "id": 2, "name": "男性-基础素体", "image_url": "🧍‍♂️" },
+      { "id": 3, "name": "兽人-基础素体", "image_url": "🐺" }
+    ],
+    "component_templates": [
+      { "id": 1, "name": "基础短袖", "type": "上装", "icon_url": "👕" },
+      { "id": 2, "name": "基础长裤", "type": "下装", "icon_url": "👖" },
+      { "id": 3, "name": "百搭短裙", "type": "下装", "icon_url": "👗" },
+      { "id": 4, "name": "马丁靴", "type": "鞋靴", "icon_url": "👢" },
+      { "id": 5, "name": "单手剑", "type": "武器", "icon_url": "⚔️" },
+      { "id": 6, "name": "魔法斗篷", "type": "外套", "icon_url": "🧥" },
+      { "id": 7, "name": "兽耳", "type": "头饰", "icon_url": "🐱" },
+      { "id": 8, "name": "丝袜", "type": "下装", "icon_url": "🧦" }
+    ],
+    "test_costumes": [
+      { "user_id": 1, "name": "迷雾森林游侠套装", "cover_url": "🌲" },
+      { "user_id": 1, "name": "八方旅人旅者斗篷", "cover_url": "🎒" },
+      { "user_id": 2, "name": "山海经九尾狐汉服", "cover_url": "🦊" },
+      { "user_id": 2, "name": "东方神话青龙道袍", "cover_url": "🐉" }
+    ],
+    "common_components": [
+      { "id": 1, "name": "黑色高跟鞋", "type": "鞋靴", "icon_url": "👢" },
+      { "id": 2, "name": "猫耳", "type": "头饰", "icon_url": "🐱" },
+      { "id": 3, "name": "丝袜", "type": "下装", "icon_url": "🧦" }
+    ]
+  }
+}

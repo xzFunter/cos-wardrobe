@@ -1,0 +1,39 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+dist-ssr/
+
+# 日志
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.sw?
+
+# ========================
+# 用户数据 - 不纳入版本控制
+# ========================
+
+# SQLite 数据库文件
+*.sqlite
+*.sqlite3
+*.db
+
+# 用户上传的图片/资源文件 (整个 assets 目录排除)
+backend/assets/
+
+# 上传目录 (也排除)
+backend/uploads/
+
+# 环境相关
+*.local
