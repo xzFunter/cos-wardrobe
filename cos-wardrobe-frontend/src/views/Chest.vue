@@ -390,7 +390,7 @@ const submitForm = async () => {
         const fileData = new FormData()
         fileData.append('file', formData.value.file)
         // 上传到百宝箱目录
-        const uploadRes = await axios.post(`${API_BASE}/upload?target=common-components`, fileData)
+        const uploadRes = await axios.post(`${API_BASE}/upload?target=common_components`, fileData)
         finalIconUrl = uploadRes.data.url
     }
 

@@ -29,8 +29,15 @@ yarn-error.log*
 *.sqlite3
 *.db
 
-# 用户上传的图片/资源文件 (整个 assets 目录排除)
-backend/assets/
+# 用户上传的图片/资源文件 (只排除图片，保留目录结构)
+backend/assets/Model_img/*
+backend/assets/Costume_img/*
+backend/assets/Component_img/*
+backend/assets/Common_component_img/*
+backend/assets/Ui_img/*
+
+# 排除 assets 根目录下的孤儿文件 (不应存在)
+backend/assets/*.*
 
 # 上传目录 (也排除)
 backend/uploads/
