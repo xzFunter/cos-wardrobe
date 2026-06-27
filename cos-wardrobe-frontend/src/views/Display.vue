@@ -126,6 +126,7 @@ import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { showToast } from '../utils/toast'
 import { API_BASE, ASSET_BASE } from '../utils/api'
+import { isUrl, getAssetUrl } from '../utils/asset'
 import { VueFlow, Handle, Position, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 
@@ -149,16 +150,8 @@ const isReady = ref(false)
 const costumesList = ref([])
 const carouselRef = ref(null)
 
-// 🌟 进度条核心修正：如果启用了通用组件，默认直接算入“已拥有”的总数中 🌟
+// 🌟 进度条核心修正：如果启用了通用组件，默认直接算入”已拥有”的总数中 🌟
 const ownedCount = computed(() => activeComps.value.filter(c => c.common_component_id || c.isOwned).length)
-
-const isUrl = (str) => str && typeof str === 'string' && (str.startsWith('http') || /\.(jpg|jpeg|png|gif|webp)$/i.test(str) || str.startsWith('/assets'))
-const getAssetUrl = (url) => {
-  if (!url) return ''
-  if (url.startsWith('http')) return url
-  if (url.startsWith('/assets')) return `${ASSET_BASE}${url}`
-  return `${ASSET_BASE}/assets/costumes/${url}`
-}
 
 onMounted(async () => {
   axios.put(`${API_BASE}/users/${userId}/last-visited`, {
@@ -205,6 +198,14 @@ const loadDisplayData = async (targetId) => {
     costumeData.value = cosRes.data
     const componentsData = JSON.parse(costumeData.value.components_data || '[]')
 
+    // 实时拉取组件字典和百宝箱最新数据，确保名称/图标与最新的模板同步
+    const [compRes, commonRes] = await Promise.all([
+      axios.get(`${API_BASE}/components`),
+      axios.get(`${API_BASE}/common-components`)
+    ])
+    const componentTemplatesMap = new Map(compRes.data.map(c => [c.id, c]))
+    const commonComponentsMap = new Map(commonRes.data.map(c => [c.id, c]))
+
     activeComps.value = componentsData.filter(c => c.isActive)
     const activeNodeIds = new Set(activeComps.value.map(c => c.nodeId))
 
@@ -219,9 +220,46 @@ const loadDisplayData = async (targetId) => {
       n.draggable = false
       if (n.type === 'component') {
         const cData = activeComps.value.find(c => c.nodeId === n.id)
-        n.data = { ...n.data, ...cData }
+        if (!cData) return n
 
-        // 🌟 核心名称注入：如果工坊里更改了通用组件名称，将新名称热绑定赋值给 Canvas 节点 label 🌟
+        // 实时同步：普通组件模板的最新数据
+        if (cData.compId) {
+          const latestComp = componentTemplatesMap.get(cData.compId)
+          if (latestComp) {
+            cData.type = latestComp.type
+            cData.icon = latestComp.icon_url
+            if (!cData.common_component_id) {
+              // 未绑定通用组件时，用最新的普通组件名称
+              cData.label = latestComp.name
+              cData.defaultLabel = latestComp.name
+            }
+          }
+        }
+
+        // 实时同步：通用组件的最新数据（覆盖）
+        if (cData.common_component_id) {
+          const latestCommon = commonComponentsMap.get(cData.common_component_id)
+          if (latestCommon) {
+            cData.label = latestCommon.name
+            cData.icon = latestCommon.icon_url
+            cData.realPreview = latestCommon.icon_url
+          } else {
+            // 通用组件已被删除，回退为普通组件状态
+            cData.common_component_id = null
+            cData.isOwned = false
+            cData.realPreview = ''
+            cData.icon = ''
+            if (cData.compId) {
+              const latestComp = componentTemplatesMap.get(cData.compId)
+              if (latestComp) {
+                cData.label = latestComp.name
+                cData.icon = latestComp.icon_url
+              }
+            }
+          }
+        }
+
+        n.data = { ...n.data, ...cData }
         if (cData && cData.label) {
           n.label = cData.label
         }

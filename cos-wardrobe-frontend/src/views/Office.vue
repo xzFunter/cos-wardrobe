@@ -14,7 +14,7 @@
         </div>
 
         <div class="sort-group" v-if="currentList.length > 0">
-          <button :class="['nes-btn', isSorting ? 'is-warning' : 'is-primary']" @click="toggleSortingMode"
+          <button :class="['nes-btn', isSorting ? 'is-warning' : 'is-primary']" @click="handleToggleSort"
             style="font-size: 12px; padding: 4px 8px;">
             {{ isSorting ? '💾 完成保存' : '⚔️ 调整顺序' }}
           </button>
@@ -38,23 +38,23 @@
             <p class="item-name">{{ item.name }}</p>
             <div class="sort-controller" v-if="isSorting" @click.stop>
               <button class="nes-btn is-error sort-btn" :disabled="index === 0"
-                @click="moveItem(index, 'prev')">◀</button>
+                @click="handleMoveItem(index, 'prev')">◀</button>
               <span style="font-size: 10px; color:#ffd700;">{{ index + 1 }}</span>
               <button class="nes-btn is-success sort-btn" :disabled="index === currentList.length - 1"
-                @click="moveItem(index, 'next')">▶</button>
+                @click="handleMoveItem(index, 'next')">▶</button>
             </div>
           </div>
 
           <div v-if="cardStatuses[index]?.isFirst"
             :class="['gap-insert-anchor', 'is-left', { 'is-expanded': expandedGap === `${item.id}-left` }]"
             @mouseenter="handleGapMouseEnter(item.id, 'left')" @mouseleave="handleGapMouseLeave"
-            @click.stop="handleGapClick(item.id, 'left')">
+            @click.stop="handleGapClick(item.id, 'left', onGapConfirm)">
             <div class="gap-plus-btn">＋</div>
           </div>
 
           <div :class="['gap-insert-anchor', 'is-right', { 'is-expanded': expandedGap === `${item.id}-right` }]"
             @mouseenter="handleGapMouseEnter(item.id, 'right')" @mouseleave="handleGapMouseLeave"
-            @click.stop="handleGapClick(item.id, 'right')">
+            @click.stop="handleGapClick(item.id, 'right', onGapConfirm)">
             <div class="gap-plus-btn">＋</div>
           </div>
         </div>
@@ -72,30 +72,20 @@
           <input type="text" class="nes-input is-dark" v-model="formData.name" placeholder="输入名称...">
         </div>
 
-        <div class="nes-field form-group" v-if="activeTab === 'components'">
-          <label>组件部位</label>
-          <div class="nes-select is-dark">
-            <select v-model="formData.type">
-              <option value="" disabled selected hidden>请选择部位...</option>
-              <option v-for="type in componentTypes" :key="type" :value="type">{{ type }}</option>
-            </select>
-          </div>
-        </div>
+                <div class="nes-field form-group" v-if="activeTab === 'components'">
+                    <label>组件部位</label>
+                    <div class="nes-select is-dark">
+                        <select v-model="formData.type" :disabled="isEditMode">
+                            <option value="" disabled selected hidden>请选择部位...</option>
+                            <option v-for="type in componentTypes" :key="type" :value="type">{{ type }}</option>
+                        </select>
+                    </div>
+                    <p v-if="isEditMode" class="nes-text is-warning" style="font-size: 10px; margin-top: 4px;">
+                        ⚠️ 部位类型创建后不可更改
+                    </p>
+                </div>
 
-        <div class="nes-field form-group upload-area">
-          <label>资源图片 / Emoji</label>
-          <div class="preview-box" v-if="formData.file || formData.existingUrl">
-            <span class="nes-text is-success">已就绪: {{ formData.file ? '待上传图片 (已压缩)' : formData.existingUrl }}</span>
-          </div>
-          <input type="file" ref="cameraInput" @change="handleFileSelect" accept="image/*" capture="environment"
-            style="display: none;" />
-          <input type="file" ref="fileInput" @change="handleFileSelect" accept="image/*" style="display: none;" />
-          <div class="action-buttons" style="display: flex; gap: 10px; margin-bottom: 10px;">
-            <button class="nes-btn is-success" style="flex: 1;" @click="() => fileInput.click()">📁 选图</button>
-            <button class="nes-btn is-error" style="flex: 1;" @click="() => cameraInput.click()">📷 拍照</button>
-          </div>
-          <button class="nes-btn is-warning clip-btn" @click="readClipboard">📋 读取剪贴板内容</button>
-        </div>
+        <UploadSection label="资源图片 / Emoji" :modelValue="formData" @update:modelValue="onUploadUpdate" />
 
         <div class="dialog-menu">
           <button v-if="isEditMode && activeTab === 'components'" class="nes-btn is-error delete-btn"
@@ -111,11 +101,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { showToast } from '../utils/toast'
 import { API_BASE, ASSET_BASE } from '../utils/api'
+import { isUrl, getAssetUrl } from '../utils/asset'
+import UploadSection from '../components/UploadSection.vue'
+import { useGapInsert } from '../composables/useGapInsert'
 
 const router = useRouter()
 
@@ -129,53 +122,9 @@ const showModal = ref(false)
 const isEditMode = ref(false)
 const formData = ref({ id: null, name: '', type: '', file: null, existingUrl: '', insertBefore: null, insertAfter: null })
 
-const fileInput = ref(null)
-const cameraInput = ref(null)
-
-// === 核心微交互状态控制 ===
-const isSorting = ref(false)
-const expandedGap = ref(null)
-const shiftedCards = ref({})
-const cardStatuses = ref([])
-
+// === 缝隙插入微交互 (composable) ===
 const currentList = computed(() => activeTab.value === 'models' ? modelsList.value : componentsList.value)
 
-const isUrl = (str) => str && typeof str === 'string' && str.startsWith('/assets')
-const getAssetUrl = (url) => isUrl(url) ? `${ASSET_BASE}${url}` : url
-
-onMounted(async () => {
-  try {
-    const configRes = await axios.get(`${API_BASE}/system-config`)
-    componentTypes.value = configRes.data.enums.component_types
-    await fetchData()
-
-    document.addEventListener('click', collapseGap)
-    initResizeObserver()
-  } catch (error) {
-    showToast('❌ 无法连接到服务器！')
-  }
-})
-
-let resizeObserver
-const initResizeObserver = () => {
-  const grid = document.querySelector('.grid-area')
-  if (grid) {
-    resizeObserver = new ResizeObserver(() => updateRowStatuses())
-    resizeObserver.observe(grid)
-  }
-}
-
-onUnmounted(() => {
-  document.removeEventListener('click', collapseGap)
-  if (resizeObserver) resizeObserver.disconnect()
-})
-
-watch(currentList, async () => {
-  await nextTick()
-  updateRowStatuses()
-})
-
-// 🌟 对齐路由：获取对应数据列表 🌟
 const fetchData = async () => {
   const [modelsRes, compsRes] = await Promise.all([
     axios.get(`${API_BASE}/models`),
@@ -185,76 +134,44 @@ const fetchData = async () => {
   componentsList.value = compsRes.data
 }
 
+const getTableName = () => activeTab.value === 'models' ? 'model_templates' : 'component_templates'
+
+const {
+    isSorting, expandedGap, shiftedCards, cardStatuses,
+    updateRowStatuses, collapseGap,
+    handleGapMouseEnter, handleGapMouseLeave, handleGapClick,
+    moveItem, toggleSortingMode, initResizeObserver, destroy
+} = useGapInsert({
+    getCurrentList: () => currentList.value,
+    tableName: getTableName(), // composable 初始化时传，切 tab 后 toggleSortingMode 里会重新取
+    fetchData,
+    gridSelector: '.grid-area',
+    wrapperSelector: '.item-card-wrapper'
+})
+
+onMounted(async () => {
+  try {
+    const configRes = await axios.get(`${API_BASE}/system-config`)
+    componentTypes.value = configRes.data.enums.component_types
+    await fetchData()
+    document.addEventListener('click', collapseGap)
+    initResizeObserver()
+  } catch (error) {
+    showToast('❌ 无法连接到服务器！')
+  }
+})
+
+watch(currentList, async () => {
+  await nextTick()
+  updateRowStatuses()
+})
+
 const switchTab = async (tab) => {
   activeTab.value = tab
   isSorting.value = false
   collapseGap()
   await nextTick()
   updateRowStatuses()
-}
-
-// === 图片压缩控制 ===
-const compressImage = (file, maxSizeMB = 1) => {
-  return new Promise((resolve) => {
-    if (file.size <= maxSizeMB * 1024 * 1024) return resolve(file)
-    showToast('⏳ 图片较大，正在施放压缩魔法...')
-    const reader = new FileReader()
-    reader.readAsDataURL(file)
-    reader.onload = (e) => {
-      const img = new Image()
-      img.src = e.target.result
-      img.onload = () => {
-        const canvas = document.createElement('canvas')
-        const ctx = canvas.getContext('2d')
-        let { width, height } = img
-        if (width > 1024 || height > 1024) {
-          const ratio = Math.min(1024 / width, 1024 / height)
-          width *= ratio
-          height *= ratio
-        }
-        canvas.width = width
-        canvas.height = height
-        ctx.drawImage(img, 0, 0, width, height)
-        canvas.toBlob((blob) => {
-          const compressedFile = new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg', lastModified: Date.now() })
-          resolve(compressedFile)
-        }, 'image/jpeg', 0.8)
-      }
-    }
-  })
-}
-
-const handleFileSelect = async (event) => {
-  const file = event.target.files[0]
-  if (!file) return
-  formData.value.file = await compressImage(file)
-  formData.value.existingUrl = ''
-}
-
-const readClipboard = async () => {
-  try {
-    const items = await navigator.clipboard.read()
-    for (const item of items) {
-      if (item.types.some(t => t.startsWith('image/'))) {
-        const imageType = item.types.find(t => t.startsWith('image/'))
-        const blob = await item.getType(imageType)
-        const originalFile = new File([blob], 'clipboard_image.png', { type: blob.type })
-        formData.value.file = await compressImage(originalFile)
-        formData.value.existingUrl = ''
-        return showToast('✅ 成功捕获并压缩剪贴板图片！')
-      }
-      if (item.types.includes('text/plain')) {
-        const blob = await item.getType('text/plain')
-        const text = await blob.text()
-        formData.value.existingUrl = text.trim()
-        formData.value.file = null
-        return showToast(`✅ 捕获剪贴板内容：${text.trim()}`)
-      }
-    }
-    showToast('⚠️ 剪贴板里似乎没有我能认出的东西。')
-  } catch (err) {
-    showToast('❌ 无法读取，请检查浏览器是否允许访问剪贴板。')
-  }
 }
 
 const openAddModal = (gapConfig = null) => {
@@ -265,6 +182,14 @@ const openAddModal = (gapConfig = null) => {
     insertAfter: gapConfig?.side === 'right' ? gapConfig.id : null
   }
   showModal.value = true
+}
+
+const onGapConfirm = (gapConfig) => {
+  openAddModal(gapConfig)
+}
+
+const onUploadUpdate = (val) => {
+  Object.assign(formData.value, val)
 }
 
 const handleItemClick = (item) => {
@@ -282,96 +207,15 @@ const handleItemClick = (item) => {
   showModal.value = true
 }
 
-// ====== 横向原力位移核心计算 ======
-const updateRowStatuses = () => {
-  const wrappers = document.querySelectorAll('.item-card-wrapper')
-  const statuses = new Array(wrappers.length).fill(null).map(() => ({ isFirst: false, isLast: false }))
-  if (wrappers.length === 0) { cardStatuses.value = statuses; return }
-
-  let currentRowY = -1
-  wrappers.forEach((el, index) => {
-    const y = el.offsetTop
-    if (y !== currentRowY) {
-      if (index > 0) statuses[index - 1].isLast = true
-      currentRowY = y
-      statuses[index].isFirst = true
-    }
-  })
-  if (wrappers.length > 0) statuses[wrappers.length - 1].isLast = true
-  cardStatuses.value = statuses
-}
-
-const expandGap = (id, side) => {
-  expandedGap.value = `${id}-${side}`
-  const newShifted = {}
-  const targetIndex = currentList.value.findIndex(c => c.id === id)
-  if (targetIndex === -1) return
-
-  const shiftVal = window.innerWidth <= 768 ? '50px' : '55px'
-  const shiftValNeg = window.innerWidth <= 768 ? '-50px' : '-55px'
-
-  requestAnimationFrame(() => {
-    const wrappers = document.querySelectorAll('.item-card-wrapper')
-    const targetWrapper = wrappers[targetIndex]
-    if (!targetWrapper) return
-
-    const rowY = targetWrapper.offsetTop
-    const status = cardStatuses.value[targetIndex]
-
-    if (side === 'left') {
-      for (let i = targetIndex; i < wrappers.length; i++) {
-        if (wrappers[i].offsetTop === rowY) newShifted[currentList.value[i].id] = shiftVal
-        else break
-      }
-    } else if (side === 'right') {
-      if (status.isLast) {
-        for (let i = targetIndex; i >= 0; i--) {
-          if (wrappers[i].offsetTop === rowY) newShifted[currentList.value[i].id] = shiftValNeg
-          else break
-        }
-      } else {
-        for (let i = targetIndex + 1; i < wrappers.length; i++) {
-          if (wrappers[i].offsetTop === rowY) newShifted[currentList.value[i].id] = shiftVal
-          else break
-        }
-      }
-    }
-    shiftedCards.value = newShifted
-  })
-}
-
-const collapseGap = () => {
-  expandedGap.value = null
-  shiftedCards.value = {}
-}
-
-const handleGapMouseEnter = (id, side) => {
-  if (window.matchMedia('(hover: hover)').matches) expandGap(id, side)
-}
-const handleGapMouseLeave = () => {
-  if (window.matchMedia('(hover: hover)').matches) collapseGap()
-}
-
-const handleGapClick = (id, side) => {
-  const gapKey = `${id}-${side}`
-  if (expandedGap.value === gapKey) {
-    openAddModal({ id, side })
-    collapseGap()
-  } else {
-    expandGap(id, side)
-  }
-}
-
-// 🌟 找到 toggleSortingMode 函数，修改 else 分支里的 table 变量 🌟
-const toggleSortingMode = async () => {
+// 🌟 覆盖 composable 的排序存储——Office 的 tableName 随 activeTab 动态切换
+const handleToggleSort = async () => {
   if (!isSorting.value) {
     isSorting.value = true
-    showToast(`🧙‍♂️ 开启整队模式，缝隙亦可插空`)
+    showToast('🧙‍♂️ 开启整队模式')
   } else {
     try {
       const idList = currentList.value.map(item => item.id)
       const table = activeTab.value === 'models' ? 'model_templates' : 'component_templates'
-
       await axios.post(`${API_BASE}/save-order`, { table, idList })
       isSorting.value = false
       showToast('✨ 序列已安全存档！')
@@ -382,33 +226,37 @@ const toggleSortingMode = async () => {
   }
 }
 
-const moveItem = (index, direction) => {
+const handleMoveItem = (index, direction) => {
   const list = activeTab.value === 'models' ? modelsList.value : componentsList.value
   const targetIndex = direction === 'prev' ? index - 1 : index + 1
   if (targetIndex < 0 || targetIndex >= list.length) return
-  [list[index], list[targetIndex]] = [list[targetIndex], list[index]]
+  ;[list[index], list[targetIndex]] = [list[targetIndex], list[index]]
 }
 
-// 🌟 对齐路由与 Payload 参数结构 🌟
+// === 表单提交 ===
 const submitForm = async () => {
   if (!formData.value.name) return showToast('❌ 必须有名字！')
   if (activeTab.value === 'components' && !formData.value.type) return showToast('❌ 请选择组件部位！')
 
   let finalIconUrl = formData.value.existingUrl || (activeTab.value === 'models' ? '👤' : '❓')
   if (formData.value.file) {
-    const fileData = new FormData()
-    fileData.append('file', formData.value.file)
-    const uploadRes = await axios.post(`${API_BASE}/upload?target=${activeTab.value}`, fileData)
-    finalIconUrl = uploadRes.data.url
+    try {
+      const fileData = new FormData()
+      fileData.append('file', formData.value.file)
+      const uploadRes = await axios.post(`${API_BASE}/upload?target=${activeTab.value}`, fileData)
+      finalIconUrl = uploadRes.data.url
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message || '上传失败'
+      return showToast(`❌ ${msg}`)
+    }
   }
 
   const path = activeTab.value === 'models' ? 'models' : 'components'
   const endpoint = `${API_BASE}/${path}`
 
-  // 对齐后端 POST 路由中解构的 Body 属性名
   const payload = activeTab.value === 'models'
     ? { name: formData.value.name, image_url: finalIconUrl }
-    : { name: formData.value.name, type: formData.value.type, icon_url: finalIconUrl } // 后端用的是 icon_url
+    : { name: formData.value.name, type: formData.value.type, icon_url: finalIconUrl }
 
   if (!isEditMode.value) {
     if (formData.value.insertAfter) payload.insert_after_id = formData.value.insertAfter

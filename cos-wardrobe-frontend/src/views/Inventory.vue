@@ -41,13 +41,13 @@
         <div v-if="cardStatuses[index]?.isFirst"
           :class="['gap-insert-anchor', 'is-left', { 'is-expanded': expandedGap === `${costume.id}-left` }]"
           @mouseenter="handleGapMouseEnter(costume.id, 'left')" @mouseleave="handleGapMouseLeave"
-          @click.stop="handleGapClick(costume.id, 'left')">
+          @click.stop="handleGapClick(costume.id, 'left', onGapConfirm)">
           <div class="gap-plus-btn">＋</div>
         </div>
 
         <div :class="['gap-insert-anchor', 'is-right', { 'is-expanded': expandedGap === `${costume.id}-right` }]"
           @mouseenter="handleGapMouseEnter(costume.id, 'right')" @mouseleave="handleGapMouseLeave"
-          @click.stop="handleGapClick(costume.id, 'right')">
+          @click.stop="handleGapClick(costume.id, 'right', onGapConfirm)">
           <div class="gap-plus-btn">＋</div>
         </div>
 
@@ -57,78 +57,53 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { showToast } from '../utils/toast'
 import { API_BASE, ASSET_BASE } from '../utils/api'
+import { isUrl, getAssetUrl } from '../utils/asset'
+import { useGapInsert } from '../composables/useGapInsert'
 
 const costumes = ref([])
-const isSorting = ref(false)
 const router = useRouter()
 const userId = localStorage.getItem('currentUserId')
-
-// 🌟 交互魔法状态变量 🌟
-const expandedGap = ref(null)      // 例如: '12-left' 或 '12-right'
-const shiftedCards = ref({})       // 记录需要位移的卡片及距离，例如: { '12': '55px', '13': '-55px' }
-const cardStatuses = ref([])       // 记录每张卡片是否是行首/行尾
-
-const isUrl = (str) => str && typeof str === 'string' && (str.startsWith('http') || /\.(jpg|jpeg|png|gif|webp)$/i.test(str))
-const getAssetUrl = (url) => {
-  if (!url) return ''
-  if (url.startsWith('http')) return url
-  if (url.startsWith('/assets')) return `${ASSET_BASE}${url}`
-  return `${ASSET_BASE}/assets/costumes/${url}`
-}
 
 const loadData = async () => {
   try {
     const res = await axios.get(`${API_BASE}/costumes?userId=${userId}`)
     costumes.value = res.data
+    if (res.data.length === 0) {
+      showToast('🛡️ 仓库空空如也，去锻造第一件装备吧')
+    }
   } catch (error) {
-    console.error(error)
+    console.error('加载套装列表失败:', error)
+    showToast('❌ 加载套装列表失败，请检查网络连接')
   }
 }
 
-// 🌟 核心侦测：利用 DOM 物理坐标，动态计算每张卡片是不是行头或行尾
-const updateRowStatuses = () => {
-  const wrappers = document.querySelectorAll('.costume-card-wrapper')
-  const statuses = new Array(wrappers.length).fill(null).map(() => ({ isFirst: false, isLast: false }))
-  if (wrappers.length === 0) { cardStatuses.value = statuses; return }
-
-  let currentRowY = -1
-  let currentRowStartIndex = 0
-
-  wrappers.forEach((el, index) => {
-    const y = el.offsetTop
-    if (y !== currentRowY) {
-      if (index > 0) statuses[index - 1].isLast = true
-      currentRowY = y
-      currentRowStartIndex = index
-      statuses[index].isFirst = true
-    }
-  })
-  if (wrappers.length > 0) statuses[wrappers.length - 1].isLast = true
-  cardStatuses.value = statuses
+const onGapConfirm = (gapConfig) => {
+  router.push({ path: '/app/forge', query: gapConfig.side === 'left' ? { insertBefore: gapConfig.id } : { insertAfter: gapConfig.id } })
 }
 
-let resizeObserver
+const {
+    isSorting, expandedGap, shiftedCards, cardStatuses,
+    updateRowStatuses, collapseGap,
+    handleGapMouseEnter, handleGapMouseLeave, handleGapClick,
+    moveItem, toggleSortingMode, initResizeObserver, destroy
+} = useGapInsert({
+    getCurrentList: () => costumes.value,
+    tableName: 'user_costumes',
+    fetchData: loadData,
+    gridSelector: '.costume-grid',
+    wrapperSelector: '.costume-card-wrapper'
+})
+
 onMounted(() => {
   if (!userId) return router.push('/')
   loadData()
-
   document.addEventListener('click', collapseGap)
-
-  const grid = document.querySelector('.costume-grid')
-  if (grid) {
-    resizeObserver = new ResizeObserver(() => updateRowStatuses())
-    resizeObserver.observe(grid)
-  }
-})
-
-onUnmounted(() => {
-  document.removeEventListener('click', collapseGap)
-  if (resizeObserver) resizeObserver.disconnect()
+  initResizeObserver()
 })
 
 watch(costumes, async () => {
@@ -139,98 +114,6 @@ watch(costumes, async () => {
 const handleCardClick = (id) => {
   if (isSorting.value) return
   router.push(`/app/display/${id}`)
-}
-
-// ====== 🌟 史诗级让位魔法：原力推开算法 ======
-const expandGap = (id, side) => {
-  expandedGap.value = `${id}-${side}`
-  const newShifted = {}
-
-  const targetIndex = costumes.value.findIndex(c => c.id === id)
-  if (targetIndex === -1) return
-
-  // 计算屏幕响应式的排挤距离
-  const shiftVal = window.innerWidth <= 768 ? '50px' : '55px'
-  const shiftValNeg = window.innerWidth <= 768 ? '-50px' : '-55px'
-
-  requestAnimationFrame(() => {
-    const wrappers = document.querySelectorAll('.costume-card-wrapper')
-    const targetWrapper = wrappers[targetIndex]
-    if (!targetWrapper) return
-
-    const rowY = targetWrapper.offsetTop
-    const status = cardStatuses.value[targetIndex]
-
-    if (side === 'left') {
-      // 场景 1: 点击行首左侧，当前及后续同行卡片全部往【右】让路
-      for (let i = targetIndex; i < wrappers.length; i++) {
-        if (wrappers[i].offsetTop === rowY) newShifted[costumes.value[i].id] = shiftVal
-        else break
-      }
-    } else if (side === 'right') {
-      if (status.isLast) {
-        // 场景 2: 点击行末右侧，当前及之前同行卡片全部往【左】让路
-        for (let i = targetIndex; i >= 0; i--) {
-          if (wrappers[i].offsetTop === rowY) newShifted[costumes.value[i].id] = shiftValNeg
-          else break
-        }
-      } else {
-        // 场景 3: 点击中间缝隙，后续同行卡片全部往【右】让路
-        for (let i = targetIndex + 1; i < wrappers.length; i++) {
-          if (wrappers[i].offsetTop === rowY) newShifted[costumes.value[i].id] = shiftVal
-          else break
-        }
-      }
-    }
-    shiftedCards.value = newShifted
-  })
-}
-
-const collapseGap = () => {
-  expandedGap.value = null
-  shiftedCards.value = {}
-}
-
-const handleGapMouseEnter = (id, side) => {
-  if (window.matchMedia('(hover: hover)').matches) expandGap(id, side)
-}
-const handleGapMouseLeave = () => {
-  if (window.matchMedia('(hover: hover)').matches) collapseGap()
-}
-
-// 完美兼容手机的“一击激活，再击确认”手势逻辑
-const handleGapClick = (id, side) => {
-  const gapKey = `${id}-${side}`
-  if (expandedGap.value === gapKey) {
-    // 根据触发的方向，向后端下达精准的“前插”或“后插”指令
-    router.push({ path: '/app/forge', query: side === 'left' ? { insertBefore: id } : { insertAfter: id } })
-    collapseGap()
-  } else {
-    expandGap(id, side)
-  }
-}
-
-const toggleSortingMode = async () => {
-  if (!isSorting.value) {
-    isSorting.value = true
-    showToast('🧙‍♂️ 开启整队模式，缝隙亦可插槽')
-  } else {
-    try {
-      const idList = costumes.value.map(c => c.id)
-      await axios.post(`${API_BASE}/save-order`, { table: 'user_costumes', idList })
-      isSorting.value = false
-      showToast('✨ 队伍序列已安全存档！')
-      await loadData()
-    } catch (err) {
-      showToast('❌ 存档失败')
-    }
-  }
-}
-
-const moveItem = (index, direction) => {
-  const targetIndex = direction === 'prev' ? index - 1 : index + 1
-  if (targetIndex < 0 || targetIndex >= costumes.value.length) return
-  [costumes.value[index], costumes.value[targetIndex]] = [costumes.value[targetIndex], costumes.value[index]]
 }
 
 const goToForge = () => router.push('/app/forge')

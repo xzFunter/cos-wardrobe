@@ -133,7 +133,7 @@
                         <button class="nes-btn is-error" style="flex: 1;" @click="() => cameraInput.click()">📷
                             拍照</button>
                     </div>
-                    <button class="nes-btn is-warning clip-btn" @click="readClipboard">📋 读取剪贴板内容</button>
+                    <button class="nes-btn is-warning clip-btn" @click="handleClipboard">📋 读取剪贴板内容</button>
                 </div>
 
                 <div class="dialog-menu" style="display: flex; margin-top: 30px; justify-content: flex-end; gap: 15px;">
@@ -154,6 +154,8 @@ import { showToast } from '../utils/toast'
 import { VueFlow, useVueFlow, Handle, Position } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { API_BASE, ASSET_BASE } from '../utils/api'
+import { isUrl, getAssetUrl } from '../utils/asset'
+import { compressImage, readClipboard } from '../utils/image'
 
 const route = useRoute()
 const router = useRouter()
@@ -170,11 +172,6 @@ const fileInput = ref(null)
 const cameraInput = ref(null)
 const editFormData = ref({ name: '', file: null, existingUrl: '' })
 
-// 判定资源是否为后端静态文件
-const isUrl = (str) => str && typeof str === 'string' && str.startsWith('/assets')
-// 拼接完整局域网图片地址
-const getAssetUrl = (url) => isUrl(url) ? `${ASSET_BASE}${url}` : url
-
 // 判定组件是否已在画布中
 const isAdded = (comp) => {
     return nodes.value.some(n => n.data && n.data.componentId === comp.id)
@@ -184,15 +181,30 @@ onMounted(async () => {
     const modelId = route.params.id
 
     try {
-        const modelRes = await axios.get(`${API_BASE}/models/${modelId}`)
+        const [modelRes, compRes] = await Promise.all([
+            axios.get(`${API_BASE}/models/${modelId}`),
+            axios.get(`${API_BASE}/components`)
+        ])
         modelData.value = modelRes.data
-
-        const compRes = await axios.get(`${API_BASE}/components`)
         componentsList.value = compRes.data
+
+        // 组件模板 Map 用于实时同步连线图上已有节点的名称/图标
+        const componentTemplatesMap = new Map(compRes.data.map(c => [c.id, c]))
 
         if (modelData.value.layout_data) {
             const savedGraph = JSON.parse(modelData.value.layout_data)
-            nodes.value = savedGraph.nodes || []
+            // 实时同步已有节点的数据
+            nodes.value = (savedGraph.nodes || []).map(n => {
+                if (n.type === 'component' && n.data && n.data.componentId) {
+                    const latest = componentTemplatesMap.get(n.data.componentId)
+                    if (latest) {
+                        n.label = latest.name
+                        n.data.icon = latest.icon_url
+                        n.data.type = latest.type
+                    }
+                }
+                return n
+            })
             edges.value = savedGraph.edges || []
 
             const modelNode = nodes.value.find(n => n.type === 'model')
@@ -218,13 +230,15 @@ onMounted(async () => {
 // === 画布核心逻辑保持不变 ===
 const addNodeToCanvas = (comp) => {
     const newNodeId = `comp-${comp.id}-${Date.now()}`
+    // 使用最新的组件模板数据
+    const latest = componentsList.value.find(c => c.id === comp.id) || comp
     nodes.value.push({
         id: newNodeId,
         type: 'component',
-        label: comp.name,
+        label: latest.name,
         position: { x: Math.random() * 100 + 50, y: Math.random() * 200 + 50 },
         zIndex: 10,
-        data: { icon: comp.icon_url, type: comp.type, componentId: comp.id }
+        data: { icon: latest.icon_url, type: latest.type, componentId: latest.id }
     })
 }
 
@@ -326,36 +340,6 @@ const openEditModal = () => {
     showEditModal.value = true
 }
 
-const compressImage = (file, maxSizeMB = 1) => {
-    return new Promise((resolve) => {
-        if (file.size <= maxSizeMB * 1024 * 1024) return resolve(file)
-        showToast('⏳ 图片较大，正在施放压缩魔法...')
-        const reader = new FileReader()
-        reader.readAsDataURL(file)
-        reader.onload = (e) => {
-            const img = new Image()
-            img.src = e.target.result
-            img.onload = () => {
-                const canvas = document.createElement('canvas')
-                const ctx = canvas.getContext('2d')
-                let { width, height } = img
-                if (width > 1024 || height > 1024) {
-                    const ratio = Math.min(1024 / width, 1024 / height)
-                    width *= ratio
-                    height *= ratio
-                }
-                canvas.width = width
-                canvas.height = height
-                ctx.drawImage(img, 0, 0, width, height)
-                canvas.toBlob((blob) => {
-                    const compressedFile = new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg', lastModified: Date.now() })
-                    resolve(compressedFile)
-                }, 'image/jpeg', 0.8)
-            }
-        }
-    })
-}
-
 const handleFileSelect = async (event) => {
     const file = event.target.files[0]
     if (!file) return
@@ -363,30 +347,17 @@ const handleFileSelect = async (event) => {
     editFormData.value.existingUrl = ''
 }
 
-const readClipboard = async () => {
-    try {
-        const items = await navigator.clipboard.read()
-        for (const item of items) {
-            if (item.types.some(t => t.startsWith('image/'))) {
-                const imageType = item.types.find(t => t.startsWith('image/'))
-                const blob = await item.getType(imageType)
-                const originalFile = new File([blob], 'clipboard_image.png', { type: blob.type })
-                editFormData.value.file = await compressImage(originalFile)
-                editFormData.value.existingUrl = ''
-                return showToast('✅ 成功捕获并压缩剪贴板图片！')
-            }
-            if (item.types.includes('text/plain')) {
-                const blob = await item.getType('text/plain')
-                const text = await blob.text()
-                editFormData.value.existingUrl = text.trim()
-                editFormData.value.file = null
-                return showToast(`✅ 捕获剪贴板内容：${text.trim()}`)
-            }
+const handleClipboard = () => {
+    readClipboard(
+        (compressedFile) => {
+            editFormData.value.file = compressedFile
+            editFormData.value.existingUrl = ''
+        },
+        (text) => {
+            editFormData.value.existingUrl = text
+            editFormData.value.file = null
         }
-        showToast('⚠️ 剪贴板里似乎没有我能认出的东西。')
-    } catch (err) {
-        showToast('❌ 无法读取，请检查浏览器是否允许访问剪贴板。')
-    }
+    )
 }
 
 const submitEditForm = async () => {
@@ -394,10 +365,15 @@ const submitEditForm = async () => {
 
     let finalImageUrl = editFormData.value.existingUrl
     if (editFormData.value.file) {
-        const fileData = new FormData()
-        fileData.append('file', editFormData.value.file)
-        const uploadRes = await axios.post(`${API_BASE}/upload?target=models`, fileData)
-        finalImageUrl = uploadRes.data.url
+        try {
+            const fileData = new FormData()
+            fileData.append('file', editFormData.value.file)
+            const uploadRes = await axios.post(`${API_BASE}/upload?target=models`, fileData)
+            finalImageUrl = uploadRes.data.url
+        } catch (err) {
+            const msg = err.response?.data?.error || err.message || '上传失败'
+            return showToast(`❌ ${msg}`)
+        }
     }
 
     try {

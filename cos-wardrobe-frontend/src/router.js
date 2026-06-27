@@ -49,7 +49,19 @@ const routes = [{
     }
 ]
 
-export default createRouter({
+const router = createRouter({
     history: createWebHistory(),
     routes
 })
+
+// 路由守卫：未登录自动跳回酒馆大门
+router.beforeEach((to, from, next) => {
+    const userId = localStorage.getItem('currentUserId');
+    if (to.path.startsWith('/app') && !userId) {
+        next('/');
+    } else {
+        next();
+    }
+});
+
+export default router

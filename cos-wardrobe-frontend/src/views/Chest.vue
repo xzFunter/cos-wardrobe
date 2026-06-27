@@ -46,13 +46,13 @@
                     <div v-if="cardStatuses[index]?.isFirst"
                         :class="['gap-insert-anchor', 'is-left', { 'is-expanded': expandedGap === `${item.id}-left` }]"
                         @mouseenter="handleGapMouseEnter(item.id, 'left')" @mouseleave="handleGapMouseLeave"
-                        @click.stop="handleGapClick(item.id, 'left')">
+                        @click.stop="handleGapClick(item.id, 'left', onGapConfirm)">
                         <div class="gap-plus-btn">＋</div>
                     </div>
 
                     <div :class="['gap-insert-anchor', 'is-right', { 'is-expanded': expandedGap === `${item.id}-right` }]"
                         @mouseenter="handleGapMouseEnter(item.id, 'right')" @mouseleave="handleGapMouseLeave"
-                        @click.stop="handleGapClick(item.id, 'right')">
+                        @click.stop="handleGapClick(item.id, 'right', onGapConfirm)">
                         <div class="gap-plus-btn">＋</div>
                     </div>
                 </div>
@@ -78,31 +78,17 @@
                 <div class="nes-field form-group">
                     <label>组件部位</label>
                     <div class="nes-select is-dark">
-                        <select v-model="formData.type">
+                        <select v-model="formData.type" :disabled="isEditMode">
                             <option value="" disabled selected hidden>请选择部位...</option>
                             <option v-for="type in componentTypes" :key="type" :value="type">{{ type }}</option>
                         </select>
                     </div>
+                    <p v-if="isEditMode" class="nes-text is-warning" style="font-size: 10px; margin-top: 4px;">
+                        ⚠️ 部位类型创建后不可更改
+                    </p>
                 </div>
 
-                <div class="nes-field form-group upload-area">
-                    <label>资源图片 / Emoji</label>
-                    <div class="preview-box" v-if="formData.file || formData.existingUrl">
-                        <span class="nes-text is-success">已就绪: {{ formData.file ? '待上传图片 (已压缩)' : formData.existingUrl
-                        }}</span>
-                    </div>
-                    <input type="file" ref="cameraInput" @change="handleFileSelect" accept="image/*"
-                        capture="environment" style="display: none;" />
-                    <input type="file" ref="fileInput" @change="handleFileSelect" accept="image/*"
-                        style="display: none;" />
-                    <div class="action-buttons" style="display: flex; gap: 10px; margin-bottom: 10px;">
-                        <button class="nes-btn is-success" style="flex: 1;" @click="() => fileInput.click()">📁
-                            选图</button>
-                        <button class="nes-btn is-error" style="flex: 1;" @click="() => cameraInput.click()">📷
-                            拍照</button>
-                    </div>
-                    <button class="nes-btn is-warning clip-btn" @click="readClipboard">📋 读取剪贴板内容</button>
-                </div>
+                <UploadSection label="资源图片 / Emoji" :modelValue="formData" @update:modelValue="onUploadUpdate" />
 
                 <div class="dialog-menu">
                     <button v-if="isEditMode" class="nes-btn is-error delete-btn" @click="deleteItem">销毁组件</button>
@@ -118,10 +104,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { showToast } from '../utils/toast'
 import { API_BASE, ASSET_BASE } from '../utils/api'
+import { isUrl, getAssetUrl } from '../utils/asset'
+import { compressImage } from '../utils/image'
+import UploadSection from '../components/UploadSection.vue'
+import { useGapInsert } from '../composables/useGapInsert'
 
 // === 数据源状态 ===
 const commonComponentsList = ref([])
@@ -131,54 +121,9 @@ const showModal = ref(false)
 const isEditMode = ref(false)
 const formData = ref({ id: null, name: '', type: '', file: null, existingUrl: '', insertBefore: null, insertAfter: null })
 
-const fileInput = ref(null)
-const cameraInput = ref(null)
-
-// === 核心微交互状态控制 ===
-const isSorting = ref(false)
-const expandedGap = ref(null)
-const shiftedCards = ref({})
-const cardStatuses = ref([])
-
-// 计算属性直接绑定百宝箱列表，确保原位移定位函数全量平替兼容
+// === 缝隙插入微交互 (composable) ===
 const currentList = computed(() => commonComponentsList.value)
 
-const isUrl = (str) => str && typeof str === 'string' && str.startsWith('/assets')
-const getAssetUrl = (url) => isUrl(url) ? `${ASSET_BASE}${url}` : url
-
-onMounted(async () => {
-    try {
-        const configRes = await axios.get(`${API_BASE}/system-config`)
-        componentTypes.value = configRes.data.enums.component_types
-        await fetchData()
-
-        document.addEventListener('click', collapseGap)
-        initResizeObserver()
-    } catch (error) {
-        showToast('❌ 无法连接到服务器！')
-    }
-})
-
-let resizeObserver
-const initResizeObserver = () => {
-    const grid = document.querySelector('.grid-area')
-    if (grid) {
-        resizeObserver = new ResizeObserver(() => updateRowStatuses())
-        resizeObserver.observe(grid)
-    }
-}
-
-onUnmounted(() => {
-    document.removeEventListener('click', collapseGap)
-    if (resizeObserver) resizeObserver.disconnect()
-})
-
-watch(currentList, async () => {
-    await nextTick()
-    updateRowStatuses()
-})
-
-// 🌟 核心对接：读取百宝箱列表 🌟
 const fetchData = async () => {
     try {
         const res = await axios.get(`${API_BASE}/common-components`)
@@ -188,69 +133,35 @@ const fetchData = async () => {
     }
 }
 
-// === 图片压缩控制 ===
-const compressImage = (file, maxSizeMB = 1) => {
-    return new Promise((resolve) => {
-        if (file.size <= maxSizeMB * 1024 * 1024) return resolve(file)
-        showToast('⏳ 图片较大，正在施放压缩魔法...')
-        const reader = new FileReader()
-        reader.readAsDataURL(file)
-        reader.onload = (e) => {
-            const img = new Image()
-            img.src = e.target.result
-            img.onload = () => {
-                const canvas = document.createElement('canvas')
-                const ctx = canvas.createElement('2d') || canvas.getContext('2d')
-                let { width, height } = img
-                if (width > 1024 || height > 1024) {
-                    const ratio = Math.min(1024 / width, 1024 / height)
-                    width *= ratio
-                    height *= ratio
-                }
-                canvas.width = width
-                canvas.height = height
-                ctx.drawImage(img, 0, 0, width, height)
-                canvas.toBlob((blob) => {
-                    const compressedFile = new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg', lastModified: Date.now() })
-                    resolve(compressedFile)
-                }, 'image/jpeg', 0.8)
-            }
-        }
-    })
-}
+const {
+    isSorting, expandedGap, shiftedCards, cardStatuses,
+    updateRowStatuses, expandGap, collapseGap,
+    handleGapMouseEnter, handleGapMouseLeave, handleGapClick,
+    moveItem, toggleSortingMode, initResizeObserver, destroy
+} = useGapInsert({
+    getCurrentList: () => commonComponentsList.value,
+    tableName: 'common_components',
+    fetchData,
+    gridSelector: '.grid-area',
+    wrapperSelector: '.item-card-wrapper'
+})
 
-const handleFileSelect = async (event) => {
-    const file = event.target.files[0]
-    if (!file) return
-    formData.value.file = await compressImage(file)
-    formData.value.existingUrl = ''
-}
-
-const readClipboard = async () => {
+onMounted(async () => {
     try {
-        const items = await navigator.clipboard.read()
-        for (const item of items) {
-            if (item.types.some(t => t.startsWith('image/'))) {
-                const imageType = item.types.find(t => t.startsWith('image/'))
-                const blob = await item.getType(imageType)
-                const originalFile = new File([blob], 'clipboard_image.png', { type: blob.type })
-                formData.value.file = await compressImage(originalFile)
-                formData.value.existingUrl = ''
-                return showToast('✅ 成功捕获并压缩剪贴板图片！')
-            }
-            if (item.types.includes('text/plain')) {
-                const blob = await item.getType('text/plain')
-                const text = await blob.text()
-                formData.value.existingUrl = text.trim()
-                formData.value.file = null
-                return showToast(`✅ 捕获剪贴板内容：${text.trim()}`)
-            }
-        }
-        showToast('⚠️ 剪贴板里似乎没有我能认出的东西。')
-    } catch (err) {
-        showToast('❌ 无法读取，请检查浏览器是否允许访问剪贴板。')
+        const configRes = await axios.get(`${API_BASE}/system-config`)
+        componentTypes.value = configRes.data.enums.component_types
+        await fetchData()
+        document.addEventListener('click', collapseGap)
+        initResizeObserver()
+    } catch (error) {
+        showToast('❌ 无法连接到服务器！')
     }
-}
+})
+
+watch(currentList, async () => {
+    await nextTick()
+    updateRowStatuses()
+})
 
 const openAddModal = (gapConfig = null) => {
     isEditMode.value = false
@@ -273,125 +184,30 @@ const handleItemClick = (item) => {
     showModal.value = true
 }
 
-// ====== 横向原力位移核心计算 ======
-const updateRowStatuses = () => {
-    const wrappers = document.querySelectorAll('.item-card-wrapper')
-    const statuses = new Array(wrappers.length).fill(null).map(() => ({ isFirst: false, isLast: false }))
-    if (wrappers.length === 0) { cardStatuses.value = statuses; return }
-
-    let currentRowY = -1
-    wrappers.forEach((el, index) => {
-        const y = el.offsetTop
-        if (y !== currentRowY) {
-            if (index > 0) statuses[index - 1].isLast = true
-            currentRowY = y
-            statuses[index].isFirst = true
-        }
-    })
-    if (wrappers.length > 0) statuses[wrappers.length - 1].isLast = true
-    cardStatuses.value = statuses
+const onGapConfirm = (gapConfig) => {
+    openAddModal(gapConfig)
 }
 
-const expandGap = (id, side) => {
-    expandedGap.value = `${id}-${side}`
-    const newShifted = {}
-    const targetIndex = currentList.value.findIndex(c => c.id === id)
-    if (targetIndex === -1) return
-
-    const shiftVal = window.innerWidth <= 768 ? '50px' : '55px'
-    const shiftValNeg = window.innerWidth <= 768 ? '-50px' : '-55px'
-
-    requestAnimationFrame(() => {
-        const wrappers = document.querySelectorAll('.item-card-wrapper')
-        const targetWrapper = wrappers[targetIndex]
-        if (!targetWrapper) return
-
-        const rowY = targetWrapper.offsetTop
-        const status = cardStatuses.value[targetIndex]
-
-        if (side === 'left') {
-            for (let i = targetIndex; i < wrappers.length; i++) {
-                if (wrappers[i].offsetTop === rowY) newShifted[currentList.value[i].id] = shiftVal
-                else break
-            }
-        } else if (side === 'right') {
-            if (status.isLast) {
-                for (let i = targetIndex; i >= 0; i--) {
-                    if (wrappers[i].offsetTop === rowY) newShifted[currentList.value[i].id] = shiftValNeg
-                    else break
-                }
-            } else {
-                for (let i = targetIndex + 1; i < wrappers.length; i++) {
-                    if (wrappers[i].offsetTop === rowY) newShifted[currentList.value[i].id] = shiftVal
-                    else break
-                }
-            }
-        }
-        shiftedCards.value = newShifted
-    })
+const onUploadUpdate = (val) => {
+  Object.assign(formData.value, val)
 }
 
-const collapseGap = () => {
-    expandedGap.value = null
-    shiftedCards.value = {}
-}
-
-const handleGapMouseEnter = (id, side) => {
-    if (window.matchMedia('(hover: hover)').matches) expandGap(id, side)
-}
-const handleGapMouseLeave = () => {
-    if (window.matchMedia('(hover: hover)').matches) collapseGap()
-}
-
-const handleGapClick = (id, side) => {
-    const gapKey = `${id}-${side}`
-    if (expandedGap.value === gapKey) {
-        openAddModal({ id, side })
-        collapseGap()
-    } else {
-        expandGap(id, side)
-    }
-}
-
-// 🌟 核心对接：对齐百宝箱表排序存储 🌟
-const toggleSortingMode = async () => {
-    if (!isSorting.value) {
-        isSorting.value = true
-        showToast(`🧙‍♂️ 开启百宝箱整队模式`)
-    } else {
-        try {
-            const idList = currentList.value.map(item => item.id)
-            const table = 'common_components' // 对齐百宝箱数据库表名
-
-            await axios.post(`${API_BASE}/save-order`, { table, idList })
-            isSorting.value = false
-            showToast('✨ 百宝箱序列已安全存档！')
-            await fetchData()
-        } catch (err) {
-            showToast('❌ 保存失败')
-        }
-    }
-}
-
-const moveItem = (index, direction) => {
-    const list = commonComponentsList.value
-    const targetIndex = direction === 'prev' ? index - 1 : index + 1
-    if (targetIndex < 0 || targetIndex >= list.length) return
-    [list[index], list[targetIndex]] = [list[targetIndex], list[index]]
-}
-
-// 🌟 核心对接：通用组件增删改 Payload 结构 🌟
+// === 表单提交 ===
 const submitForm = async () => {
     if (!formData.value.name) return showToast('❌ 必须有名字！')
     if (!formData.value.type) return showToast('❌ 请选择组件部位！')
 
     let finalIconUrl = formData.value.existingUrl || '❓'
     if (formData.value.file) {
-        const fileData = new FormData()
-        fileData.append('file', formData.value.file)
-        // 上传到百宝箱目录
-        const uploadRes = await axios.post(`${API_BASE}/upload?target=common_components`, fileData)
-        finalIconUrl = uploadRes.data.url
+        try {
+            const fileData = new FormData()
+            fileData.append('file', formData.value.file)
+            const uploadRes = await axios.post(`${API_BASE}/upload?target=common_components`, fileData)
+            finalIconUrl = uploadRes.data.url
+        } catch (err) {
+            const msg = err.response?.data?.error || err.message || '上传失败'
+            return showToast(`❌ ${msg}`)
+        }
     }
 
     const endpoint = `${API_BASE}/common-components`

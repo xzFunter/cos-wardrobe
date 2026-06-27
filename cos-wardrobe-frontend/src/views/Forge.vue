@@ -136,11 +136,10 @@
                 <div class="upload-area inline-mini-upload" v-if="!comp.common_component_id">
                   <label style="font-size: 12px; margin-bottom: 5px;">实物照片 / Emoji</label>
 
-                  <div class="preview-box mini-preview" v-if="comp.realFile || comp.realPreview">
-                    <img v-if="!comp.realFile && isUrl(comp.realPreview)" :src="getAssetUrl(comp.realPreview)"
-                      class="pixel-render object-cover" />
-                    <span v-else class="nes-text is-success" style="font-size: 10px;">已就绪: {{ comp.realFile ? '待上传照片' :
-                      comp.realPreview }}</span>
+                  <div class="preview-box mini-preview" v-if="comp.realFile || (comp.realPreview && isUrl(comp.realPreview))">
+                    <img v-if="!comp.realFile && isUrl(comp.realPreview)" :src="getAssetUrl(comp.realPreview)" class="pixel-render object-cover" />
+                    <span v-if="!comp.realFile && comp.realPreview && !isUrl(comp.realPreview)" class="nes-text is-success" style="font-size: 10px;">已就绪: {{ comp.realPreview }}</span>
+                    <span v-if="comp.realFile" class="nes-text is-success" style="font-size: 10px;">已就绪: 待上传照片</span>
                   </div>
 
                   <div class="action-buttons" style="display: flex; gap: 5px; margin-bottom: 5px;">
@@ -178,6 +177,7 @@
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { isUrl, getAssetUrl } from '../utils/asset'
 import axios from 'axios'
 import { showToast } from '../utils/toast'
 import { API_BASE, ASSET_BASE } from '../utils/api'
@@ -208,66 +208,19 @@ const formData = ref({
 const costumeComponents = ref([])
 const activeCount = computed(() => costumeComponents.value.filter(c => c.isActive).length)
 
-const isUrl = (str) => str && typeof str === 'string' && (str.startsWith('http') || /\.(jpg|jpeg|png|gif|webp)$/i.test(str) || str.startsWith('/assets'))
-const getAssetUrl = (url) => {
-  if (!url) return ''
-  if (url.startsWith('http')) return url
-  if (url.startsWith('/assets')) return `${ASSET_BASE}${url}`
-  return `${ASSET_BASE}/assets/costumes/${url}`
-}
+// Forge 使用共享的 isUrl/getAssetUrl (来自 ../utils/asset)
+// 本地保留 compressImage 和 readClipboard 因为 Forge 有其特殊封装逻辑
 
 // === 数据初始化 ===
-// onMounted(async () => {
-//   if (!userId) return router.push('/')
-//   try {
-//     const [modelsRes, commonRes] = await Promise.all([
-//       axios.get(`${API_BASE}/models`),
-//       axios.get(`${API_BASE}/common-components`),
-//       axios.get(`${API_BASE}/origins`).catch(() => ({ data: [] }))
-//     ])
-//     modelsList.value = modelsRes.data
-//     commonComponentsList.value = commonRes.data
-//     originsList.value = originsRes.data // 赋值
-
-//     if (costumeId) {
-//       const cosRes = await axios.get(`${API_BASE}/costumes/${costumeId}`)
-//       const cos = cosRes.data
-//       formData.value.name = cos.name
-//       formData.value.origin = cos.origin
-//       formData.value.model_id = cos.model_id
-//       formData.value.coverPreview = cos.cover_url || ''
-
-//       if (cos.components_data) {
-//         const parsedData = JSON.parse(cos.components_data)
-//         costumeComponents.value = parsedData.map(c => {
-//           let initialSearch = ''
-//           if (c.common_component_id) {
-//             const matched = commonComponentsList.value.find(g => g.id === c.common_component_id)
-//             if (matched) initialSearch = matched.name
-//           }
-//           return {
-//             ...c,
-//             searchQuery: initialSearch,
-//             showDropdown: false,
-//             defaultLabel: c.defaultLabel || c.label, // 🌟 核心留底：记录该部位最初的名字（如：主手武器）
-//             common_component_id: c.common_component_id || null
-//           }
-//         })
-//       }
-//     }
-//   } catch (error) {
-//     showToast('❌ 数据加载失败！')
-//   }
-// })
-
 onMounted(async () => {
   if (!userId) return router.push('/')
 
   try {
 
-    // 1. 并发请求基础数据
-    const [modelsRes, commonRes, originsRes] = await Promise.all([
+    // 1. 并发请求基础数据（含组件字典用于实时同步）
+    const [modelsRes, compRes, commonRes, originsRes] = await Promise.all([
       axios.get(`${API_BASE}/models`),
+      axios.get(`${API_BASE}/components`),
       axios.get(`${API_BASE}/common-components`),
       axios.get(`${API_BASE}/origins`)
     ])
@@ -275,42 +228,149 @@ onMounted(async () => {
     modelsList.value = modelsRes.data
     commonComponentsList.value = commonRes.data
     originsList.value = originsRes.data
+    const componentTemplatesMap = new Map(compRes.data.map(c => [c.id, c]))
 
-    // 2. 如果是编辑模式，这里最容易出错！
+    // 2. 编辑模式下加载套装详情
     if (costumeId) {
-      console.log('🔍 检测到编辑模式，正在获取套装详情，ID:', costumeId)
-      const res = await axios.get(`${API_BASE}/costumes/${costumeId}`)
-      console.log('✅ 套装详情获取成功:', res.data)
-
-      // 检查这里是否有变量拼写错误，或者 res.data 结构解析错误
-    const cosRes = await axios.get(`${API_BASE}/costumes/${costumeId}`)
+      const cosRes = await axios.get(`${API_BASE}/costumes/${costumeId}`)
       const cos = cosRes.data
       formData.value.name = cos.name
       formData.value.origin = cos.origin
       formData.value.model_id = cos.model_id
       formData.value.coverPreview = cos.cover_url || ''
 
-      if (cos.components_data) {
+      // 用模特最新的蓝图节点作为基准，再合并套装快照的状态
+      if (cos.model_id) {
+        try {
+          const modelRes = await axios.get(`${API_BASE}/models/${cos.model_id}`)
+          const model = modelRes.data
+          if (model.layout_data) {
+            const graph = JSON.parse(model.layout_data)
+            const blueprintNodes = (graph.nodes || []).filter(n => n.type === 'component')
+
+            // 从套装快照中解析已有状态 (nodeId → savedState)
+            const savedStateMap = new Map()
+            if (cos.components_data) {
+              try {
+                const savedComps = JSON.parse(cos.components_data)
+                savedComps.forEach(c => { savedStateMap.set(c.nodeId, c) })
+              } catch (e) { /* ignore */ }
+            }
+
+            // 以模特最新蓝图为基准，合并套装快照中的状态
+            costumeComponents.value = blueprintNodes.map(node => {
+              const compId = node.data.componentId
+              const saved = savedStateMap.get(node.id)
+              const template = componentTemplatesMap.get(compId)
+              const baseLabel = template ? template.name : node.label
+              const baseType = template ? template.type : node.data.type
+              const baseIcon = template ? template.icon_url : node.data.icon
+
+              if (saved) {
+                // 已有状态：保留激活/拥有/通用绑定等
+                let initialSearch = ''
+                let actualRealPreview = saved.realPreview || ''
+                if (saved.common_component_id) {
+                  const matched = commonComponentsList.value.find(g => g.id === saved.common_component_id)
+                  if (matched) {
+                    initialSearch = matched.name
+                    saved.icon = matched.icon_url
+                    actualRealPreview = matched.icon_url
+                    saved.label = matched.name
+                  } else {
+                    // 通用组件已被删除，彻底回退
+                    saved.common_component_id = null
+                    saved.isOwned = false
+                    actualRealPreview = ''
+                    saved.icon = ''
+                    saved.label = baseLabel
+                  }
+                }
+                return {
+                  ...saved,
+                  compId,
+                  type: baseType,
+                  icon: saved.icon || baseIcon,
+                  defaultIcon: baseIcon,
+                  label: baseLabel,
+                  defaultLabel: baseLabel,
+                  realPreview: actualRealPreview,
+                  searchQuery: initialSearch,
+                  showDropdown: false,
+                  common_component_id: saved.common_component_id || null,
+                  realFile: null
+                }
+              } else {
+                // 蓝图新增节点，报以默认状态
+                return {
+                  nodeId: node.id,
+                  compId,
+                  label: baseLabel,
+                  defaultLabel: baseLabel,
+                  type: baseType,
+                  icon: baseIcon,
+                  defaultIcon: baseIcon,
+                  isActive: false,
+                  isOwned: false,
+                  realFile: null,
+                  realPreview: '',
+                  searchQuery: '',
+                  showDropdown: false,
+                  common_component_id: null
+                }
+              }
+            })
+          }
+        } catch (e) {
+          console.warn('模特蓝图解析失败，从套装快照回退:', e)
+          if (cos.components_data) {
+            const parsed = JSON.parse(cos.components_data)
+            costumeComponents.value = parsed.map(c => {
+              let q = ''
+              let rp = c.realPreview || ''
+              if (c.common_component_id) {
+                const m = commonComponentsList.value.find(g => g.id === c.common_component_id)
+                if (m) { q = m.name; c.icon = m.icon_url; rp = m.icon_url } else {
+                  c.common_component_id = null; c.isOwned = false; rp = ''; c.icon = ''
+                }
+              }
+              return { ...c, realPreview: rp, searchQuery: q, showDropdown: false, defaultLabel: c.defaultLabel || c.label, common_component_id: c.common_component_id || null, realFile: null }
+            })
+          }
+        }
+      } else if (cos.components_data) {
+        // 无模特蓝图兜底：仅从快照中加载
         const parsedData = JSON.parse(cos.components_data)
         costumeComponents.value = parsedData.map(c => {
           let initialSearch = ''
+          let actualRealPreview = c.realPreview || ''
           if (c.common_component_id) {
             const matched = commonComponentsList.value.find(g => g.id === c.common_component_id)
-            if (matched) initialSearch = matched.name
+            if (matched) {
+              initialSearch = matched.name
+              c.icon = matched.icon_url
+              actualRealPreview = matched.icon_url
+              c.label = matched.name
+            } else {
+              c.common_component_id = null
+              c.isOwned = false
+              actualRealPreview = ''
+              c.icon = ''
+            }
           }
           return {
             ...c,
+            realPreview: actualRealPreview,
             searchQuery: initialSearch,
             showDropdown: false,
-            defaultLabel: c.defaultLabel || c.label, // 🌟 核心留底：记录该部位最初的名字（如：主手武器）
-            common_component_id: c.common_component_id || null
+            defaultLabel: c.defaultLabel || c.label,
+            common_component_id: c.common_component_id || null,
+            realFile: null
           }
         })
       }
     }
-
   } catch (error) {
-    // 🌟 这里增加一行，直接在控制台打印出具体的错误堆栈
     console.error('❌ 页面初始化崩溃，错误详情:', error)
     showToast('❌ 数据加载失败！')
   }
@@ -419,30 +479,46 @@ const handleModelChange = async (event) => {
 
   const modelId = formData.value.model_id
   try {
-    const res = await axios.get(`${API_BASE}/models/${modelId}`)
-    const model = res.data
+    // 实时拉取最新组件字典，确保名称/图标同步
+    const [modelRes, compRes, commonRes] = await Promise.all([
+      axios.get(`${API_BASE}/models/${modelId}`),
+      axios.get(`${API_BASE}/components`),
+      axios.get(`${API_BASE}/common-components`)
+    ])
+    const model = modelRes.data
+    const componentTemplatesMap = new Map(compRes.data.map(c => [c.id, c]))
+    const commonComponentsMap = new Map(commonRes.data.map(c => [c.id, c]))
     costumeComponents.value = []
 
     if (model.layout_data) {
       const graph = JSON.parse(model.layout_data)
       const compNodes = (graph.nodes || []).filter(n => n.type === 'component')
 
-      costumeComponents.value = compNodes.map(node => ({
-        nodeId: node.id,
-        compId: node.data.componentId,
-        label: node.label,
-        defaultLabel: node.label, // 🌟 核心留底
-        type: node.data.type,
-        icon: node.data.icon,
-        defaultIcon: node.data.icon,
-        isActive: false,
-        isOwned: false,
-        realFile: null,
-        realPreview: '',
-        searchQuery: '',
-        showDropdown: false,
-        common_component_id: null
-      }))
+      costumeComponents.value = compNodes.map(node => {
+        const compId = node.data.componentId
+        const template = componentTemplatesMap.get(compId)
+        // 用最新组件模板数据覆盖蓝图快照
+        const label = template ? template.name : node.label
+        const type = template ? template.type : node.data.type
+        const icon = template ? template.icon_url : node.data.icon
+
+        return {
+          nodeId: node.id,
+          compId,
+          label,
+          defaultLabel: label,
+          type,
+          icon,
+          defaultIcon: icon,
+          isActive: false,
+          isOwned: false,
+          realFile: null,
+          realPreview: '',
+          searchQuery: '',
+          showDropdown: false,
+          common_component_id: null
+        }
+      })
     }
   } catch (err) {
     showToast('❌ 解析蓝图失败！')
@@ -605,10 +681,19 @@ const saveCostume = async () => {
     })
     await Promise.all(uploadPromises)
 
-    // 5. 数据清洗与组装 Payload
+    // 5. 数据清洗与组装 Payload，同时清理失效的 realPreview 引用
+    const activeCommonIds = new Set(commonComponentsList.value.map(g => g.id))
     const finalComponentsData = costumeComponents.value.map(c => {
-      // 剥离 UI 临时状态
       const { realFile, searchQuery, showDropdown, ...rest } = c
+      // 如果 realPreview 指向一个已不存在的通用组件图片链接，清空它
+      if (rest.realPreview && rest.realPreview.startsWith('/assets/') && !rest.common_component_id) {
+        rest.realPreview = ''
+      }
+      if (rest.common_component_id && !activeCommonIds.has(rest.common_component_id)) {
+        rest.common_component_id = null
+        rest.realPreview = ''
+        rest.isOwned = false
+      }
       return rest
     })
 
@@ -635,7 +720,8 @@ const saveCostume = async () => {
     goBack()
   } catch (error) {
     console.error('Save error:', error)
-    showToast('❌ 保存失败')
+    const msg = error.response?.data?.error || error.message || '未知错误'
+    showToast(`❌ 保存失败：${msg}`)
   } finally {
     isSaving.value = false
   }
@@ -644,8 +730,13 @@ const saveCostume = async () => {
 const uploadToServer = async (file, targetDir) => {
   const data = new FormData()
   data.append('file', file)
-  const res = await axios.post(`${API_BASE}/upload?target=${targetDir}`, data)
-  return res.data.url
+  try {
+    const res = await axios.post(`${API_BASE}/upload?target=${targetDir}`, data)
+    return res.data.url
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || '上传失败'
+    throw new Error(msg)
+  }
 }
 
 const goBack = () => {

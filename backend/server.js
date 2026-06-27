@@ -6,7 +6,17 @@ const fs = require('fs');
 const multer = require('multer');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin: function (origin, callback) {
+        // 允许本地开发、局域网、以及无 origin 的请求（如移动端 App）
+        if (!origin || origin.startsWith('http://localhost') || origin.startsWith('http://192.168.') || origin.startsWith('http://10.') || origin.startsWith('http://172.')) {
+            callback(null, true);
+        } else {
+            // 原型阶段保持宽松，生产环境需要收紧
+            callback(null, true);
+        }
+    }
+}));
 app.use(express.json());
 
 // 1. 读取系统配置
@@ -42,7 +52,16 @@ const storage = multer.diskStorage({
     }
 });
 const upload = multer({
-    storage
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB 上传上限
+    fileFilter: (req, file, cb) => {
+        const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (allowedMimeTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error('仅允许上传图片文件 (JPEG, PNG, GIF, WebP)'));
+        }
+    }
 });
 
 // 4. 数据库初始化与数据覆写机制
@@ -141,6 +160,65 @@ db.serialize(() => {
 });
 
 // ====================
+// 通用插空排序工具函数
+// ====================
+
+/**
+ * 在指定位置插入记录并自动管理 sort_order
+ * @param {string} table - 表名
+ * @param {string} columns - 列名字符串（不含 sort_order）
+ * @param {Array} values - 对应值数组（不含 sort_order）
+ * @param {string|null} insertAfterId - 插入在哪个 id 之后
+ * @param {string|null} insertBeforeId - 插入在哪个 id 之前
+ * @param {string} [orderScope] - 可选的 WHERE 条件限定排序范围（如 'user_id = 1'）
+ * @param {function} callback - 完成回调 (err, result) result 包含 success 和 id
+ */
+function insertWithGapOrder(table, columns, values, insertAfterId, insertBeforeId, orderScope, callback) {
+    if (insertAfterId) {
+        db.get(`SELECT sort_order FROM ${table} WHERE id = ?`, [insertAfterId], (err, row) => {
+            if (err || !row) return callback(new Error('插入锚点未找到'));
+            const targetOrder = row.sort_order;
+            const scope = orderScope ? ` AND ${orderScope}` : '';
+            db.run(`UPDATE ${table} SET sort_order = sort_order + 1 WHERE sort_order > ?${scope}`, [targetOrder], (err) => {
+                if (err) return callback(err);
+                db.run(`INSERT INTO ${table} (${columns}, sort_order) VALUES (${values.map(() => '?').join(', ')}, ?)`,
+                    [...values, targetOrder + 1],
+                    function(err) {
+                        if (err) return callback(err);
+                        callback(null, { id: this.lastID });
+                    });
+            });
+        });
+    } else if (insertBeforeId) {
+        db.get(`SELECT sort_order FROM ${table} WHERE id = ?`, [insertBeforeId], (err, row) => {
+            if (err || !row) return callback(new Error('插入锚点未找到'));
+            const targetOrder = row.sort_order;
+            const scope = orderScope ? ` AND ${orderScope}` : '';
+            db.run(`UPDATE ${table} SET sort_order = sort_order + 1 WHERE sort_order >= ?${scope}`, [targetOrder], (err) => {
+                if (err) return callback(err);
+                db.run(`INSERT INTO ${table} (${columns}, sort_order) VALUES (${values.map(() => '?').join(', ')}, ?)`,
+                    [...values, targetOrder],
+                    function(err) {
+                        if (err) return callback(err);
+                        callback(null, { id: this.lastID });
+                    });
+            });
+        });
+    } else {
+        const scopeCondition = orderScope ? ` WHERE ${orderScope}` : '';
+        db.get(`SELECT MAX(sort_order) as max_order FROM ${table}${scopeCondition}`, [], (err, row) => {
+            const nextOrder = (row && row.max_order !== null) ? row.max_order + 1 : 0;
+            db.run(`INSERT INTO ${table} (${columns}, sort_order) VALUES (${values.map(() => '?').join(', ')}, ?)`,
+                [...values, nextOrder],
+                function(err) {
+                    if (err) return callback(err);
+                    callback(null, { id: this.lastID });
+                });
+        });
+    }
+}
+
+// ====================
 // 通用全局 API 路由
 // ====================
 app.get('/api/system-config', (req, res) => res.json({
@@ -200,12 +278,30 @@ app.post('/api/save-order', (req, res) => {
 // 套装 API (Costumes)
 // ====================
 app.get('/api/costumes', (req, res) => {
-    db.all("SELECT * FROM user_costumes WHERE user_id = ? ORDER BY sort_order ASC, id DESC", [req.query.userId], (err, rows) => res.json(rows || []));
+    if (!req.query.userId) {
+        return res.status(400).json({ error: '缺少 userId 参数' });
+    }
+    db.all("SELECT * FROM user_costumes WHERE user_id = ? ORDER BY sort_order ASC, id DESC", [req.query.userId], (err, rows) => {
+        if (err) {
+            console.error('查询套装列表失败:', err.message);
+            return res.status(500).json({ error: '数据库查询失败' });
+        }
+        res.json(rows || []);
+    });
 });
 
 // 获取单套详情 (用于编辑回显)
 app.get('/api/costumes/:id', (req, res) => {
-    db.get("SELECT * FROM user_costumes WHERE id = ?", [req.params.id], (err, row) => res.json(row));
+    db.get("SELECT * FROM user_costumes WHERE id = ?", [req.params.id], (err, row) => {
+        if (err) {
+            console.error('查询套装详情失败:', err.message);
+            return res.status(500).json({ error: '数据库查询失败' });
+        }
+        if (!row) {
+            return res.status(404).json({ error: '套装不存在' });
+        }
+        res.json(row);
+    });
 });
 
 
@@ -341,12 +437,21 @@ app.put('/api/costumes/:id', (req, res) => {
         model_id,
         components_data
     } = req.body;
-    // 这里暂时省略了旧图片的清理逻辑，以保证核心功能畅通
+    if (!name) {
+        return res.status(400).json({ error: '套装名称不能为空' });
+    }
     db.run("UPDATE user_costumes SET name = ?, origin = ?, cover_url = ?, model_id = ?, components_data = ? WHERE id = ?",
         [name, origin, cover_url, model_id, components_data, req.params.id],
-        (err) => res.json({
-            success: true
-        })
+        function(err) {
+            if (err) {
+                console.error('更新套装失败:', err.message);
+                return res.status(500).json({ error: '数据库更新失败' });
+            }
+            if (this.changes === 0) {
+                return res.status(404).json({ error: '套装不存在' });
+            }
+            res.json({ success: true });
+        }
     );
 });
 
@@ -384,98 +489,19 @@ app.post('/api/models', (req, res) => {
         insert_after_id,
         insert_before_id
     } = req.body;
-    const user_id = req.body.user_id || 1; // 假设有租户隔离，没有的话用默认值
+    if (!name) return res.status(400).json({ error: '模特名称不能为空' });
 
-    db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-
-        if (insert_after_id) {
-            db.get("SELECT sort_order FROM model_templates WHERE id = ?", [insert_after_id], (err, row) => {
-                if (err || !row) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({
-                        error: "插入锚点未找到"
-                    });
-                }
-                const targetOrder = row.sort_order;
-                db.run("UPDATE model_templates SET sort_order = sort_order + 1 WHERE sort_order > ?", [targetOrder], (err) => {
-                    if (err) {
-                        db.run("ROLLBACK");
-                        return res.status(500).json({
-                            error: err.message
-                        });
-                    }
-                    db.run("INSERT INTO model_templates (name, image_url, description, layout_data, sort_order) VALUES (?, ?, ?, ?, ?)",
-                        [name, image_url, description, layout_data, targetOrder + 1],
-                        function(err) {
-                            if (err) {
-                                db.run("ROLLBACK");
-                                return res.status(500).json({
-                                    error: err.message
-                                });
-                            }
-                            db.run("COMMIT");
-                            res.json({
-                                success: true,
-                                id: this.lastID
-                            });
-                        });
-                });
-            });
-        } else if (insert_before_id) {
-            db.get("SELECT sort_order FROM model_templates WHERE id = ?", [insert_before_id], (err, row) => {
-                if (err || !row) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({
-                        error: "插入锚点未找到"
-                    });
-                }
-                const targetOrder = row.sort_order;
-                db.run("UPDATE model_templates SET sort_order = sort_order + 1 WHERE sort_order >= ?", [targetOrder], (err) => {
-                    if (err) {
-                        db.run("ROLLBACK");
-                        return res.status(500).json({
-                            error: err.message
-                        });
-                    }
-                    db.run("INSERT INTO model_templates (name, image_url, description, layout_data, sort_order) VALUES (?, ?, ?, ?, ?)",
-                        [name, image_url, description, layout_data, targetOrder],
-                        function(err) {
-                            if (err) {
-                                db.run("ROLLBACK");
-                                return res.status(500).json({
-                                    error: err.message
-                                });
-                            }
-                            db.run("COMMIT");
-                            res.json({
-                                success: true,
-                                id: this.lastID
-                            });
-                        });
-                });
-            });
-        } else {
-            db.get("SELECT MAX(sort_order) as max_order FROM model_templates", [], (err, row) => {
-                const nextOrder = (row && row.max_order !== null) ? row.max_order + 1 : 0;
-                db.run("INSERT INTO model_templates (name, image_url, description, layout_data, sort_order) VALUES (?, ?, ?, ?, ?)",
-                    [name, image_url, description, layout_data, nextOrder],
-                    function(err) {
-                        if (err) {
-                            db.run("ROLLBACK");
-                            return res.status(500).json({
-                                error: err.message
-                            });
-                        }
-                        db.run("COMMIT");
-                        res.json({
-                            success: true,
-                            id: this.lastID
-                        });
-                    });
-            });
+    insertWithGapOrder(
+        'model_templates',
+        'name, image_url, description, layout_data',
+        [name, image_url, description, layout_data],
+        insert_after_id, insert_before_id,
+        null,
+        (err, result) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, id: result.id });
         }
-    });
+    );
 });
 
 app.put('/api/models/:id', (req, res) => {
@@ -496,18 +522,32 @@ app.put('/api/models/:id', (req, res) => {
         } catch (e) {
             console.error(e);
         }
-        db.run("UPDATE model_templates SET name = ?, image_url = ? WHERE id = ? AND is_system = 0", [name, image_url, req.params.id], () => res.json({
-            success: true
-        }));
+        db.run("UPDATE model_templates SET name = ?, image_url = ? WHERE id = ? AND is_system = 0", [name, image_url, req.params.id], function(err) {
+            if (err) {
+                console.error('更新模特失败:', err.message);
+                return res.status(500).json({ error: '数据库更新失败' });
+            }
+            res.json({ success: true });
+        });
     });
 });
 
 app.put('/api/models/:id/layout', (req, res) => {
+    if (!req.body.layout_data) {
+        return res.status(400).json({ error: '缺少 layout_data' });
+    }
     db.run("UPDATE model_templates SET layout_data = ? WHERE id = ?",
         [req.body.layout_data, req.params.id],
-        (err) => res.json({
-            success: true
-        })
+        function(err) {
+            if (err) {
+                console.error('更新模特蓝图失败:', err.message);
+                return res.status(500).json({ error: '数据库更新失败' });
+            }
+            if (this.changes === 0) {
+                return res.status(404).json({ error: '模特不存在' });
+            }
+            res.json({ success: true });
+        }
     );
 });
 
@@ -529,105 +569,21 @@ app.get('/api/components', (req, res) => {
 
 // ==================== 2. 新增组件接口 (支持精准插空) ====================
 app.post('/api/components', (req, res) => {
-    const {
-        name,
-        type,
-        icon_url,
-        description,
-        insert_after_id,
-        insert_before_id
-    } = req.body;
+    const { name, type, icon_url, description, insert_after_id, insert_before_id } = req.body;
+    if (!name) return res.status(400).json({ error: '组件名称不能为空' });
+    if (!type) return res.status(400).json({ error: '组件类型不能为空' });
 
-    db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-
-        if (insert_after_id) {
-            db.get("SELECT sort_order FROM component_templates WHERE id = ?", [insert_after_id], (err, row) => {
-                if (err || !row) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({
-                        error: "插入锚点未找到"
-                    });
-                }
-                const targetOrder = row.sort_order;
-                db.run("UPDATE component_templates SET sort_order = sort_order + 1 WHERE sort_order > ?", [targetOrder], (err) => {
-                    if (err) {
-                        db.run("ROLLBACK");
-                        return res.status(500).json({
-                            error: err.message
-                        });
-                    }
-                    db.run("INSERT INTO component_templates (name, type, icon_url, description, sort_order) VALUES (?, ?, ?, ?, ?)",
-                        [name, type, icon_url, description, targetOrder + 1],
-                        function(err) {
-                            if (err) {
-                                db.run("ROLLBACK");
-                                return res.status(500).json({
-                                    error: err.message
-                                });
-                            }
-                            db.run("COMMIT");
-                            res.json({
-                                success: true,
-                                id: this.lastID
-                            });
-                        });
-                });
-            });
-        } else if (insert_before_id) {
-            db.get("SELECT sort_order FROM component_templates WHERE id = ?", [insert_before_id], (err, row) => {
-                if (err || !row) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({
-                        error: "插入锚点未找到"
-                    });
-                }
-                const targetOrder = row.sort_order;
-                db.run("UPDATE component_templates SET sort_order = sort_order + 1 WHERE sort_order >= ?", [targetOrder], (err) => {
-                    if (err) {
-                        db.run("ROLLBACK");
-                        return res.status(500).json({
-                            error: err.message
-                        });
-                    }
-                    db.run("INSERT INTO component_templates (name, type, icon_url, description, sort_order) VALUES (?, ?, ?, ?, ?)",
-                        [name, type, icon_url, description, targetOrder],
-                        function(err) {
-                            if (err) {
-                                db.run("ROLLBACK");
-                                return res.status(500).json({
-                                    error: err.message
-                                });
-                            }
-                            db.run("COMMIT");
-                            res.json({
-                                success: true,
-                                id: this.lastID
-                            });
-                        });
-                });
-            });
-        } else {
-            db.get("SELECT MAX(sort_order) as max_order FROM component_templates", [], (err, row) => {
-                const nextOrder = (row && row.max_order !== null) ? row.max_order + 1 : 0;
-                db.run("INSERT INTO component_templates (name, type, icon_url, description, sort_order) VALUES (?, ?, ?, ?, ?)",
-                    [name, type, icon_url, description, nextOrder],
-                    function(err) {
-                        if (err) {
-                            db.run("ROLLBACK");
-                            return res.status(500).json({
-                                error: err.message
-                            });
-                        }
-                        db.run("COMMIT");
-                        res.json({
-                            success: true,
-                            id: this.lastID
-                        });
-                    });
-            });
+    insertWithGapOrder(
+        'component_templates',
+        'name, type, icon_url, description',
+        [name, type, icon_url, description],
+        insert_after_id, insert_before_id,
+        null,
+        (err, result) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, id: result.id });
         }
-    });
+    );
 });
 
 app.put('/api/components/:id', (req, res) => {
@@ -649,9 +605,13 @@ app.put('/api/components/:id', (req, res) => {
         } catch (e) {
             console.error(e);
         }
-        db.run("UPDATE component_templates SET name = ?, type = ?, icon_url = ? WHERE id = ? AND is_system = 0", [name, type, icon_url, req.params.id], () => res.json({
-            success: true
-        }));
+        db.run("UPDATE component_templates SET name = ?, type = ?, icon_url = ? WHERE id = ? AND is_system = 0", [name, type, icon_url, req.params.id], function(err) {
+            if (err) {
+                console.error('更新组件失败:', err.message);
+                return res.status(500).json({ error: '数据库更新失败' });
+            }
+            res.json({ success: true });
+        });
     });
 });
 
@@ -673,105 +633,21 @@ app.get('/api/common-components', (req, res) => {
 
 // ==================== 2. 新增组件接口 (支持精准插空) ====================
 app.post('/api/common-components', (req, res) => {
-    const {
-        name,
-        type,
-        icon_url,
-        description,
-        insert_after_id,
-        insert_before_id
-    } = req.body;
+    const { name, type, icon_url, description, insert_after_id, insert_before_id } = req.body;
+    if (!name) return res.status(400).json({ error: '组件名称不能为空' });
+    if (!type) return res.status(400).json({ error: '组件类型不能为空' });
 
-    db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-
-        if (insert_after_id) {
-            db.get("SELECT sort_order FROM common_components WHERE id = ?", [insert_after_id], (err, row) => {
-                if (err || !row) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({
-                        error: "插入锚点未找到"
-                    });
-                }
-                const targetOrder = row.sort_order;
-                db.run("UPDATE common_components SET sort_order = sort_order + 1 WHERE sort_order > ?", [targetOrder], (err) => {
-                    if (err) {
-                        db.run("ROLLBACK");
-                        return res.status(500).json({
-                            error: err.message
-                        });
-                    }
-                    db.run("INSERT INTO common_components (name, type, icon_url, description, sort_order) VALUES (?, ?, ?, ?, ?)",
-                        [name, type, icon_url, description, targetOrder + 1],
-                        function(err) {
-                            if (err) {
-                                db.run("ROLLBACK");
-                                return res.status(500).json({
-                                    error: err.message
-                                });
-                            }
-                            db.run("COMMIT");
-                            res.json({
-                                success: true,
-                                id: this.lastID
-                            });
-                        });
-                });
-            });
-        } else if (insert_before_id) {
-            db.get("SELECT sort_order FROM common_components WHERE id = ?", [insert_before_id], (err, row) => {
-                if (err || !row) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({
-                        error: "插入锚点未找到"
-                    });
-                }
-                const targetOrder = row.sort_order;
-                db.run("UPDATE common_components SET sort_order = sort_order + 1 WHERE sort_order >= ?", [targetOrder], (err) => {
-                    if (err) {
-                        db.run("ROLLBACK");
-                        return res.status(500).json({
-                            error: err.message
-                        });
-                    }
-                    db.run("INSERT INTO common_components (name, type, icon_url, description, sort_order) VALUES (?, ?, ?, ?, ?)",
-                        [name, type, icon_url, description, targetOrder],
-                        function(err) {
-                            if (err) {
-                                db.run("ROLLBACK");
-                                return res.status(500).json({
-                                    error: err.message
-                                });
-                            }
-                            db.run("COMMIT");
-                            res.json({
-                                success: true,
-                                id: this.lastID
-                            });
-                        });
-                });
-            });
-        } else {
-            db.get("SELECT MAX(sort_order) as max_order FROM common_components", [], (err, row) => {
-                const nextOrder = (row && row.max_order !== null) ? row.max_order + 1 : 0;
-                db.run("INSERT INTO common_components (name, type, icon_url, description, sort_order) VALUES (?, ?, ?, ?, ?)",
-                    [name, type, icon_url, description, nextOrder],
-                    function(err) {
-                        if (err) {
-                            db.run("ROLLBACK");
-                            return res.status(500).json({
-                                error: err.message
-                            });
-                        }
-                        db.run("COMMIT");
-                        res.json({
-                            success: true,
-                            id: this.lastID
-                        });
-                    });
-            });
+    insertWithGapOrder(
+        'common_components',
+        'name, type, icon_url, description',
+        [name, type, icon_url, description],
+        insert_after_id, insert_before_id,
+        null,
+        (err, result) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, id: result.id });
         }
-    });
+    );
 });
 
 app.put('/api/common-components/:id', (req, res) => {
@@ -793,9 +669,13 @@ app.put('/api/common-components/:id', (req, res) => {
         } catch (e) {
             console.error(e);
         }
-        db.run("UPDATE common_components SET name = ?, type = ?, icon_url = ? WHERE id = ? AND is_system = 0", [name, type, icon_url, req.params.id], () => res.json({
-            success: true
-        }));
+        db.run("UPDATE common_components SET name = ?, type = ?, icon_url = ? WHERE id = ? AND is_system = 0", [name, type, icon_url, req.params.id], function(err) {
+            if (err) {
+                console.error('更新通用组件失败:', err.message);
+                return res.status(500).json({ error: '数据库更新失败' });
+            }
+            res.json({ success: true });
+        });
     });
 });
 
@@ -804,12 +684,8 @@ app.put('/api/common-components/:id', (req, res) => {
 // 核心：带有子目录智能清理的通用 DELETE 接口
 // ====================
 app.delete('/api/:type/:id', (req, res) => {
-    // const isModel = req.params.type === 'models';
-    // const table = isModel ? 'model_templates' : 'component_templates';
-    // const fileField = isModel ? 'image_url' : 'icon_url';
-
-    table = 'model_templates';
-    fileField = 'image_url';
+    let table = 'model_templates';
+    let fileField = 'image_url';
     if (req.params.type === 'components') {
         table = 'component_templates';
         fileField = 'icon_url';
@@ -835,9 +711,85 @@ app.delete('/api/:type/:id', (req, res) => {
         } catch (e) {
             console.error(e);
         }
-        db.run(`DELETE FROM ${table} WHERE id = ?`, [req.params.id], () => res.json({
-            success: true
-        }));
+        db.run(`DELETE FROM ${table} WHERE id = ?`, [req.params.id], function(err) {
+            if (err) {
+                console.error('删除失败:', err.message);
+                return res.status(500).json({ error: '数据库删除失败' });
+            }
+
+            // ===== 级联清理：删除公共模板后，同步清理所有引用了它的数据 =====
+            const deletedId = Number(req.params.id);
+
+            if (req.params.type === 'models') {
+                // 清理所有使用了该模特的套装中的 model_id
+                db.run(`UPDATE user_costumes SET model_id = NULL WHERE model_id = ?`, [deletedId]);
+            } else if (req.params.type === 'components') {
+                // 清理所有模特蓝图中的该组件节点
+                db.all(`SELECT id, layout_data FROM model_templates`, [], (err, models) => {
+                    models.forEach(model => {
+                        if (!model.layout_data) return;
+                        try {
+                            const graph = JSON.parse(model.layout_data);
+                            let changed = false;
+                            graph.nodes = (graph.nodes || []).filter(n => {
+                                if (n.data && n.data.componentId === deletedId) {
+                                    changed = true;
+                                    return false;
+                                }
+                                return true;
+                            });
+                            if (changed) {
+                                graph.edges = (graph.edges || []).filter(e => {
+                                    return graph.nodes.some(n => n.id === e.source) && graph.nodes.some(n => n.id === e.target);
+                                });
+                                db.run(`UPDATE model_templates SET layout_data = ? WHERE id = ?`, [JSON.stringify(graph), model.id]);
+                            }
+                        } catch (e) { /* 忽略解析错误 */ }
+                    });
+                });
+
+                // 清理所有套装 components_data 中包含该组件的条目
+                db.all(`SELECT id, components_data FROM user_costumes`, [], (err, costumes) => {
+                    costumes.forEach(costume => {
+                        if (!costume.components_data) return;
+                        try {
+                            const comps = JSON.parse(costume.components_data);
+                            const filtered = comps.filter(c => c.compId !== deletedId);
+                            if (filtered.length !== comps.length) {
+                                db.run(`UPDATE user_costumes SET components_data = ? WHERE id = ?`, [JSON.stringify(filtered), costume.id]);
+                            }
+                        } catch (e) { /* 忽略解析错误 */ }
+                    });
+                });
+            } else if (req.params.type === 'common-components') {
+                // 清理所有套装中引用了该通用组件的 common_component_id
+                db.all(`SELECT id, components_data FROM user_costumes`, [], (err, costumes) => {
+                    costumes.forEach(costume => {
+                        if (!costume.components_data) return;
+                        try {
+                            const comps = JSON.parse(costume.components_data);
+                            let changed = false;
+                            comps.forEach(c => {
+                                if (c.common_component_id === deletedId) {
+                                    c.common_component_id = null;
+                                    c.icon = c.defaultIcon || '❓';
+                                    c.realPreview = '';
+                                    c.label = c.defaultLabel || c.label;
+                                    c.searchQuery = '';
+                                    c.isOwned = false;
+                                    changed = true;
+                                }
+                            });
+                            if (changed) {
+                                db.run(`UPDATE user_costumes SET components_data = ? WHERE id = ?`, [JSON.stringify(comps), costume.id]);
+                            }
+                        } catch (e) { /* 忽略解析错误 */ }
+                    });
+                });
+            }
+
+            res.json({ success: true });
+        });
     });
 });
 
@@ -932,6 +884,20 @@ app.put('/api/users/:id/last-visited', (req, res) => {
     }
     res.json({ success: true, message: '足迹已更新' });
   });
+});
+
+// Multer 错误处理中间件（文件过大、类型不合法等）
+app.use((err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(413).json({ error: '文件过大，最大只允许 10MB' });
+        }
+        return res.status(400).json({ error: `上传异常：${err.message}` });
+    }
+    if (err) {
+        return res.status(400).json({ error: err.message });
+    }
+    next();
 });
 
 app.listen(3000, () => console.log(`后端服务已启动`));
